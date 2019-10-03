@@ -12,7 +12,7 @@ namespace proxy
 	{
 		public Startup(IConfiguration configuration)
 		{
-			Configuration = configuration;
+			Configuration = configuration; 
 		}
 
 		public IConfiguration Configuration { get; }
@@ -21,16 +21,9 @@ namespace proxy
 		public void ConfigureServices(IServiceCollection services)
 		{
 			services.AddProxy();
-			// services.AddProxy(options =>
-			// {
-			// 	options.PrepareRequest = (originalRequest, message) =>
-			// 	{
-			// 		message.Headers.Add("X-Forwarded-Host", originalRequest.Host.Host);
-			// 		return Task.FromResult(0);
-			// 	};
-			// });
+			services.AddSingleton<SessionHandler>();
 
-			// services.AddControllers();
+			services.AddControllers();
 		}
 
 		// This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
@@ -43,12 +36,13 @@ namespace proxy
 
 			app.UseSerilogRequestLogging();
 
-			app
-				.RunProxy(context => context
-					.ForwardTo("http://localhost:12345/")
-					.AddXForwardedHeaders()
-					.Send());
+			app.Map("/session", sessionHandler => sessionHandler.RunProxy<SessionHandler>());
 
+			app.UseRouting();
+			app.UseEndpoints(endpoints =>
+			{
+				endpoints.MapControllers();
+			});
 		}
 	}
 }
