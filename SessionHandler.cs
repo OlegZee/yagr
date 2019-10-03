@@ -1,32 +1,51 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using ProxyKit;
 
 namespace proxy
 {
+	public class HostConfig
+	{
+		public string HostUri { get; set; }
+		public int Limit { get; set; }
+		public uint Weight { get; set; }
+	}
+	
+	public class RouterConfig
+	{
+		public List<HostConfig> Hosts { get; set; }
+	}
+	
 	public class SessionHandler : IProxyHandler
 	{
 		private readonly ILogger<SessionHandler> _logger;
 
-		// TODO move the hosts/sessions to its own service
-		private static RoundRobin Hosts = new RoundRobin
-		{
-			"http://localhost:4444/wd/hub/session",
-			"http://localhost:4445/wd/hub/session"
-		};
+		private readonly RoundRobin _hosts;
+		private readonly IDictionary<string, UpstreamHost> _sessions = new ConcurrentDictionary<string, UpstreamHost>();
 		
-		private static readonly IDictionary<string, UpstreamHost> _sessions = new ConcurrentDictionary<string, UpstreamHost>();
+		private readonly RouterConfig _config = new RouterConfig();
 
-		public SessionHandler(ILogger<SessionHandler> logger)
+		public SessionHandler(ILogger<SessionHandler> logger, IConfiguration config)
 		{
 			_logger = logger;
+
+			config.GetSection("router").Bind(_config);
+			_logger.LogInformation("{0} routers configured", _config.Hosts.Count);
+			
+			_hosts = new RoundRobin((
+				from h in _config.Hosts
+				select new UpstreamHost(h.HostUri, Math.Max(1, h.Weight))
+				).ToArray()
+			);
 		}
 
 		private static readonly SemaphoreSlim _sessionLimitLock = new SemaphoreSlim(2);
@@ -35,11 +54,11 @@ namespace proxy
 		{
 			_logger.LogInformation("Acquiring session, current count: {0}", _sessionLimitLock.CurrentCount);
 			// TODO take the host with least number of sessions
-			// TODO ensure we do not exceed the limits
+			// TODO ensure we do not exceed the limits/per host
 			await _sessionLimitLock.WaitAsync();
 			
 			_logger.LogInformation("Acquired session, current count: {0}", _sessionLimitLock.CurrentCount);
-			return Hosts.Next();
+			return _hosts.Next();
 		}
 
 		public async Task<HttpResponseMessage> HandleProxyRequest(HttpContext context)
