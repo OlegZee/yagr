@@ -22,6 +22,7 @@ namespace proxy
 		{
 			services.AddProxy();
 			services.AddSingleton<SessionHandler>();
+			services.AddSingleton<IHostsRegistry,HostsRegistry>();
 
 			services.AddControllers();
 		}
