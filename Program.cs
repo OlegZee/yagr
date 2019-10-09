@@ -5,6 +5,8 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 
 using Serilog;
+using Serilog.Events;
+using Serilog.Sinks.SystemConsole.Themes;
 
 namespace proxy
 {
@@ -32,11 +34,13 @@ namespace proxy
 				.Enrich.FromLogContext()
 				.Enrich.WithProperty("SourceContext", "")
 				.WriteTo.Debug()
-				.WriteTo.Console(
-					// {Properties:j} added:
-//					outputTemplate: "\\\\{SourceContext:l}\\\\ [{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj} " +
-//					                "{Properties:j}{NewLine}{Exception}"
-				)
+//				.WriteTo.Console(
+//					restrictedToMinimumLevel: LogEventLevel.Information,
+//					theme: AnsiConsoleTheme.Code
+//					// {Properties:j} added:
+////					outputTemplate: "\\\\{SourceContext:l}\\\\ [{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj} " +
+////					                "{Properties:j}{NewLine}{Exception}"
+//				)
 				.CreateLogger();
 
 			try
