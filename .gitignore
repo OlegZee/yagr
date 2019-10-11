@@ -19,5 +19,6 @@ packages
 *.swp
 TestResult.*
 .vscode/
+.vs/
 .idea/
 Logs/

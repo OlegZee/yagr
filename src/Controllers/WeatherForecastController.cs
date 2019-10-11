@@ -5,7 +5,7 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 
-namespace proxy.Controllers
+namespace QaKit.Yagr.Controllers
 {
     [ApiController]
     [Route("[controller]")]

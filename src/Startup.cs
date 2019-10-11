@@ -6,7 +6,7 @@ using Microsoft.Extensions.Hosting;
 using ProxyKit;
 using Serilog;
 
-namespace proxy
+namespace QaKit.Yagr
 {
 	public class Startup
 	{
@@ -23,6 +23,7 @@ namespace proxy
 			services.AddProxy();
 			services.AddSingleton<SessionHandler>();
 			services.AddSingleton<IHostsRegistry,HostsRegistry>();
+			services.AddHttpClient();
 
 			services.AddControllers();
 		}

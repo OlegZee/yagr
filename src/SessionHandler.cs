@@ -11,7 +11,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using ProxyKit;
 
-namespace proxy
+namespace QaKit.Yagr
 {
 	public class SessionHandler : IProxyHandler
 	{
@@ -76,18 +76,18 @@ namespace proxy
 				}
 			}
 
-			string capability(string capKey) => capabilityJsonWireW3C(capKey, capKey);
+			string GetCapability(string capKey) => capabilityJsonWireW3C(capKey, capKey);
 
-			return new Caps()
+			return new Caps
 			{
-				browser = capability("browserName") switch
+				browser = GetCapability("browserName") switch
 				{
-					"" => capability("deviceName"),
+					"" => GetCapability("deviceName"),
 					string s  => s
 				},
 				version = capabilityJsonWireW3C("version", "browserVersion"),
 				platform = capabilityJsonWireW3C("platform", "platformName"),
-				labels = capability("labels")
+				labels = GetCapability("labels")
 			};
 		}
 
@@ -151,7 +151,7 @@ namespace proxy
 			do
 			{
 				var caps = await ReadCaps(context);
-				_logger.LogInformation($"Requested caps: {caps.browser}-{caps.version}-{caps.platform}-{caps.labels}");
+				_logger.LogInformation($"Requested caps: {JsonSerializer.Serialize(caps)}");
 
 				var host = await _registry.GetAvailableHost(caps);
 				var sessionEndpoint = new Uri(new Uri(host.Uri.AbsoluteUri.TrimEnd('/') + "/"), "session");

@@ -8,12 +8,13 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using ProxyKit;
 
-namespace proxy
+namespace QaKit.Yagr
 {
 	public interface IHostsRegistry
 	{
 		Task<UpstreamHost> GetAvailableHost(Caps caps);
 		void ReleaseHost(UpstreamHost host);
+		RouterConfig GetConfig();
 	}
 
 	public struct Caps
@@ -23,29 +24,30 @@ namespace proxy
 
 	public class VersionInfo
 	{
-		public string Number { get; set; }
-		public string Platform { get; set; }
+		public string Number { get; set; } = "";
+		public string Platform { get; set; } = "";
 	}
 
 	public class BrowsersInfo
 	{
-		public string Name { get; set; }
-		public string DefaultVersion { get; set; }
-		public VersionInfo[] Versions { get; set; }
+		public string Name { get; set; } = "";
+		public string DefaultVersion { get; set; } = "";
+		public string DefaultPlatform { get; set; } = "";
+		public List<VersionInfo> Versions { get; } = new List<VersionInfo>();
 	}
 
 	public class HostConfig
 	{
-		public string HostUri { get; set; }
+		public string HostUri { get; set; } = "";
 		public int Limit { get; set; }
 		public uint Weight { get; set; }
 		
-		public BrowsersInfo[] Browsers { get; set; }
+		public List<BrowsersInfo> Browsers { get; } = new List<BrowsersInfo>();
 	}
 	
 	public class RouterConfig
 	{
-		public List<HostConfig> Hosts { get; set; }
+		public List<HostConfig> Hosts { get; } = new List<HostConfig>();
 		public int SessionsLimit { get; set; }
 	}
 
@@ -53,7 +55,7 @@ namespace proxy
 	public class HostsRegistry : IHostsRegistry
 	{
 		private readonly ILogger _logger;
-		private RouterConfig _config = new RouterConfig();
+		private readonly RouterConfig _config = new RouterConfig();
 		
 		private readonly RoundRobin _hosts;
 		private readonly SemaphoreSlim _sessionLimitLock;
@@ -82,31 +84,45 @@ namespace proxy
 				);
 		}
 
-		private bool SatisfiesCaps(Caps caps, Uri host)
+		sealed class FindHostResult
 		{
-			var hostConfig = _config.Hosts.Find(config => config.HostUri == host.ToString());
-			if (hostConfig == null)
+			public FindHostResult(Uri host, string version, string platform)
 			{
-				_logger.LogError("Failed to locate host info {0}", host);
-				return true;
-			}
+				Host = host;
+				Version = version;
+				Platform = platform;
+			} 
+			public Uri Host { get; }
+			public string Version { get; }
+			public string Platform { get; }
+		}
 
-			if (hostConfig.Browsers == null)
+		private IEnumerable<FindHostResult> FindHosts(Caps caps, Uri? host)
+		{
+			foreach (var hostConfig in _config.Hosts.Where(config => host == null || config.HostUri == host.ToString()))
 			{
-				return true;
-			}
-
-			foreach (var browser in hostConfig.Browsers.Where(info => info.Name == caps.browser))
-			{
-				if (browser.Versions == null || browser.Versions.Any(
-					version => (caps.version == "" || version.Number.StartsWith(caps.version))
-						&& (caps.platform == "" || version.Platform.StartsWith(caps.platform))))
+				if (!hostConfig.Browsers.Exists(_ => true))
 				{
-					return true;
+					yield return new FindHostResult(new Uri(hostConfig.HostUri), "", "");
+				}
+
+				var version = caps.version;
+				var platform = caps.platform;
+				
+				foreach (var browser in hostConfig.Browsers.Where(info => info.Name == caps.browser))
+				{
+					if (version == "") version = browser.DefaultVersion;
+					if (platform == "" || platform == "ANY") platform = browser.DefaultPlatform;
+					
+					if (browser.Versions == null || browser.Versions.Any(
+						    v =>
+							    (version == "" || v.Number.StartsWith(version))
+							    && (platform == "" || v.Platform.StartsWith(platform))))
+					{
+						yield return new FindHostResult(new Uri(hostConfig.HostUri), version, platform);
+					}
 				}
 			}
-
-			return false;
 		}
 		
 		public async Task<UpstreamHost> GetAvailableHost(Caps caps)
@@ -115,13 +131,14 @@ namespace proxy
 			await _sessionLimitLock.WaitAsync();
 			
 			var triedHostCount = 0;
-			Uri lastHostTried = null;
+			Uri? lastHostTried = null;
 			
 			do
 			{
 				var host = _hosts.Next();
 
-				if (SatisfiesCaps(caps, host.Uri))
+				var foundHosts = FindHosts(caps, host.Uri);
+				if (foundHosts.Any())
 				{
 					var semaphore = _hostLimits[host.Uri];
 					if (semaphore.CurrentCount > 0)
@@ -154,6 +171,11 @@ namespace proxy
 			_sessionLimitLock.Release();
 			_logger.LogInformation("Released host {0}, host limit: {1}, global limit: {2}",
 				host.Uri, semaphore.CurrentCount, _sessionLimitLock.CurrentCount);
+		}
+
+		public RouterConfig GetConfig()
+		{
+			return _config;
 		}
 	}
 }
