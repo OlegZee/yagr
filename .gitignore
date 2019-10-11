@@ -20,5 +20,6 @@ packages
 TestResult.*
 .vscode/
 .vs/
+.ionide/
 .idea/
 Logs/
