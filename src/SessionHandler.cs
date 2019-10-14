@@ -6,6 +6,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
@@ -29,13 +30,15 @@ namespace QaKit.Yagr
 		
 		private readonly ILogger<SessionHandler> _logger;
 		private readonly IHostsRegistry _registry;
+		private readonly IHttpClientFactory _factory;
 
 		private readonly IDictionary<string, SessionData> _sessions = new ConcurrentDictionary<string, SessionData>();
 		
-		public SessionHandler(ILogger<SessionHandler> logger, IHostsRegistry registry)
+		public SessionHandler(ILogger<SessionHandler> logger, IHostsRegistry registry, IHttpClientFactory factory)
 		{
 			_logger = logger;
 			_registry = registry;
+			_factory = factory;
 		}
 
 		private async Task<Caps> ReadCaps(HttpContext context)
@@ -130,13 +133,27 @@ namespace QaKit.Yagr
 				_logger.LogError("Session cancelled! {0}", sessionId);			
 				_sessions.Remove(sessionId);
 				_registry.ReleaseHost(sessionData.Host);
+
+				_logger.LogInformation("Sending DELETE request! {0}", sessionId);
+				
+				using var client = _factory.CreateClient("delete");
+				var deleteSession = new Uri(sessionData.Endpoint, $"/session/{sessionId}");
+
+				var cts = new CancellationTokenSource(4000);
+				try
+				{
+					await client.DeleteAsync(deleteSession, cts.Token);
+				}
+				catch (Exception e)
+				{
+					_logger.LogError("sending DELETE to a '{0}' failed: {1}", deleteSession, e.Message);
+				}
 			}
 			if (context.Request.Method == "DELETE")
 			{
 				if (!response.IsSuccessStatusCode)
 				{
 					_logger.LogError("DELETE '{0}' query for {1} session failed", sessionData.Endpoint, sessionId);
-					// TODO is the host stale?
 				}
 					
 				_sessions.Remove(sessionId);
