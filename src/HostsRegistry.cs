@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
+using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Configuration;
@@ -61,7 +62,7 @@ namespace QaKit.Yagr
 		private readonly SemaphoreSlim _sessionLimitLock;
 		private readonly IReadOnlyDictionary<Uri, SemaphoreSlim> _hostLimits;
 
-		public HostsRegistry(IConfiguration config, ILogger<HostsRegistry> logger)
+		public HostsRegistry(IConfiguration config, ILogger<HostsRegistry> logger, IHttpClientFactory clientFactory)
 		{
 			_logger = logger;
 
@@ -70,18 +71,47 @@ namespace QaKit.Yagr
 
 			_sessionLimitLock = new SemaphoreSlim(_config.SessionsLimit == 0u ? 2^10: _config.SessionsLimit);
 
+			// TODO async wake up
+			var checkAliveCli = clientFactory.CreateClient("checkalive");
+			var tasks = from h in _config.Hosts select IsHostAlive(h.HostUri, checkAliveCli).ContinueWith(task => task.Result ? h.HostUri : null);
+			var aliveHosts = (from uri in Task.WhenAll(tasks).Result where uri != null select uri).ToList();
+
+			if (aliveHosts.Count() != _config.Hosts.Count)
+			{
+				var deadHosts = from h in _config.Hosts where !aliveHosts.Contains(h.HostUri) select h.HostUri;
+
+				_logger.LogWarning("Hosts appears not available: {0}", 
+					string.Join(", ", (from h in deadHosts select h.ToString()).ToArray()));
+			}
+
 			var hosts = (
 				from h in _config.Hosts
-				let weight = Math.Max(1, h.Weight)
+				where aliveHosts.Contains(h.HostUri)
+				let weight = Math.Max(0, h.Weight)
 				let host = new UpstreamHost(h.HostUri, weight)
 				let limit = Math.Max(1, h.Limit)
 				select new { host, weight, limit } ).ToList();
-			
-			_hosts = new RoundRobin(hosts.Select(h => h.host).ToArray());
+
+			_hosts = new RoundRobin((from h in hosts select h.host).ToArray());
 
 			_hostLimits = new ReadOnlyDictionary<Uri, SemaphoreSlim>(
 				hosts.ToDictionary(arg => arg.host.Uri, arg => new SemaphoreSlim(arg.limit))
 				);
+		}
+
+		private static async Task<bool> IsHostAlive(string host, HttpClient client)
+		{
+			var cts = new CancellationTokenSource(2000);
+			try
+			{
+				var statusUri = new Uri(new Uri(host), "/status");
+				var response = await client.GetAsync(statusUri, cts.Token);
+				return response.IsSuccessStatusCode;
+			}
+			catch
+			{
+				return false;
+			}
 		}
 
 		sealed class FindHostResult

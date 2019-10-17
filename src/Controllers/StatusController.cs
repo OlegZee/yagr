@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
@@ -18,16 +19,26 @@ namespace QaKit.Yagr.Controllers
 		{
 			public class SessionsInfo
 			{
-				public int count { get; set; }
-				public List<object> sessions { get; set; }
+				public SessionsInfo() : this(0, new List<object>())
+				{}
+
+				public SessionsInfo(int count, List<object> sessions)
+				{
+					this.Count = count;
+					this.Sessions = sessions;
+				}
+				
+				[JsonPropertyName("count")]
+				public int Count { get; set; }
+				
+				[JsonPropertyName("sessions")]
+				public List<object> Sessions { get; set; }
 
 				public SessionsInfo Merge(SessionsInfo other)
 				{
 					if (other == null) return this;
-					var result = new SessionsInfo { count = count + other.count, sessions = new List<object>()};
-					result.sessions.AddRange(sessions);
-					result.sessions.AddRange(other.sessions);
-					return result;
+					
+					return new SessionsInfo(Count + other.Count, Sessions.Concat(other.Sessions).ToList());
 				}
 			}
 
