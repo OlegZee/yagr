@@ -91,43 +91,53 @@ namespace QaKit.Yagr
 
 		sealed class FindHostResult
 		{
-			public FindHostResult(Uri host, string version, string platform)
+			public FindHostResult(Uri host, Caps caps)
 			{
 				Host = host;
-				Version = version;
-				Platform = platform;
+				Caps = caps;
 			} 
 			public Uri Host { get; }
-			public string Version { get; }
-			public string Platform { get; }
+			public Caps Caps { get; }
 		}
 
 		private static IEnumerable<FindHostResult> FindHosts(IEnumerable<HostConfig> configs, Caps caps, Uri? host)
 		{
 			foreach (var hostConfig in configs.Where(config => host == null || config.HostUri == host.ToString()))
 			{
-				if (!hostConfig.Browsers.Any())
+				var resultCaps = FulfilCaps(hostConfig, caps);
+				if (resultCaps != null)
 				{
-					yield return new FindHostResult(new Uri(hostConfig.HostUri), "", "");
-				}
-
-				var version = caps.Version;
-				var platform = caps.Platform;
-				
-				foreach (var browser in hostConfig.Browsers.Where(info => info.Name == caps.Browser))
-				{
-					if (version == "") version = browser.DefaultVersion;
-					if (platform == "" || platform == "ANY") platform = browser.DefaultPlatform;
-					
-					if (browser.Versions == null || browser.Versions.Any(
-						v =>
-							(version == "" || v.Number.StartsWith(version))
-							&& (platform == "" || v.Platform.StartsWith(platform))))
-					{
-						yield return new FindHostResult(new Uri(hostConfig.HostUri), version, platform);
-					}
+					yield return new FindHostResult(new Uri(hostConfig.HostUri), resultCaps);
 				}
 			}
+		}
+
+		private static Caps FulfilCaps(HostConfig hostConfig, Caps caps)
+		{
+			// TODO this does not seem correct as grid might be requesting say chromedriver while host does only support Mozilla
+			// I took this code from GGR and got no idea why it's done that way
+			if (!hostConfig.Browsers.Any())
+			{				
+				return Caps.FromBVPL("", "", "", "");
+			}
+
+			var version = caps.Version;
+			var platform = caps.Platform;
+			
+			foreach (var browser in hostConfig.Browsers.Where(info => info.Name == caps.Browser))
+			{
+				if (version == "") version = browser.DefaultVersion;
+				if (platform == "" || platform == "ANY") platform = browser.DefaultPlatform;
+				
+				if (browser.Versions == null || browser.Versions.Any(
+					v =>
+						(version == "" || v.Number.StartsWith(version))
+						&& (platform == "" || v.Platform.StartsWith(platform))))
+				{
+					return Caps.FromBVPL(browser.Name, version, platform, "");
+				}
+			}
+			return null;
 		}
 		
 		public async Task<UpstreamHost> GetAvailableHost(Caps caps)

@@ -6,46 +6,92 @@ using System.Threading.Tasks;
 
 namespace QaKit.Yagr
 {
-	public class Request
-	{}
 
-	public class Result
-	{}
+	public class Consumer
+	{
+		public void ProcessRequest()
+		{
+		}
+	}
+
+	public class Request
+	{
+		private readonly Caps _caps;
+
+		public Request(Caps caps)
+		{
+			_caps = caps;
+		}
+	}
+
+	public class Worker: IDisposable
+	{
+		private readonly Action _setComplete;
+		public Caps Caps { get; private set; }
+
+		public Worker(Action setComplete, Caps caps)
+		{
+			_setComplete = setComplete;
+			Caps = caps;
+		}
+
+		public void Dispose() => _setComplete();
+	}
 
 	public class RoundRobinBalancer
 	{
-		public static async Task StartBalancer(Uri[] machines, CancellationToken cancel)
+		private class Ticket
 		{
-			var queue = Channel.CreateUnbounded<Request>();
-			var results = Channel.CreateUnbounded<Result>();
+			private readonly TaskCompletionSource<Worker> _workerTcs = new TaskCompletionSource<Worker>();
 
-			var inputQueue = queue.Reader.ReadAllAsync(cancel);
+			public Ticket(Request req)
+			{}
 
-			async Task<Result> ProcessTask(Request request, CancellationToken cancel)
+			public Task<Worker> AwaitWorker() => _workerTcs.Task;
+
+			public Task Process(Uri machine, Caps caps)
 			{
-				throw new NotImplementedException();
+				var processingComplete = new TaskCompletionSource<bool>();
+				_workerTcs.SetResult(new Worker(() => processingComplete.SetResult(true), caps));
+				return processingComplete.Task;
 			}
+		}
 
-			async Task Worker(Uri machine)
+		private Channel<Ticket> _queue = Channel.CreateUnbounded<Ticket>();
+
+		public Task Run(Uri[] machines, CancellationToken cancel)
+		{
+			return RunBalancer(_queue.Reader, machines, cancel);
+		}
+
+		public async Task<Worker> GetNext(Request req)
+		{
+			var ticket = new Ticket(req);
+			await _queue.Writer.WriteAsync(ticket);
+
+			var worker = await ticket.AwaitWorker();
+			return worker;
+		}
+
+		private static async Task RunBalancer(ChannelReader<Ticket> inputQueue, Uri[] machines, CancellationToken cancel)
+		{
+			var input = inputQueue.ReadAllAsync(cancel);
+
+			async Task Worker(Uri machine, Caps caps)
 			{
-				await foreach (var t in inputQueue.WithCancellation(cancel))
+				await foreach (var req in input.WithCancellation(cancel))
 				{
-					var result = await ProcessTask(t, cancel);
-					await results.Writer.WriteAsync(result, cancel);
+					await req.Process(machine, caps);
 				}
+				// queue is empty, quit the worker
 			}
 
-			foreach (var machine in machines)
-			{
-				foreach (var p in Enumerable.Range(0, 4))
-				{
-					Task.Factory.StartNew(async () => await Worker(machine), cancel);
-				}
-			}
-			
-			
+			var processingPool =
+				from machine in machines
+				from p in Enumerable.Range(0, 4)
+				select Worker(machine, Caps.FromBVPL("", "", "", ""));
 
-			return;
+			await Task.WhenAll(processingPool);
 		}
 
 	}

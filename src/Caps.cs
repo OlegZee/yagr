@@ -70,5 +70,15 @@ namespace QaKit.Yagr
 			};
 		}
 
+		public static Caps FromBVPL(string browser, string version, string platform, string labels)
+		{
+			return new Caps {
+				Browser = browser,
+				Version = version,
+				Platform = platform,
+				Labels = labels
+			};
+		}
+
 	}
 }
