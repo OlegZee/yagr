@@ -2,7 +2,7 @@
 Microsoft Visual Studio Solution File, Format Version 12.00
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "yagr", "src\yagr.csproj", "{03152043-D842-422E-90A4-0C63F1CB1E7F}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "tests1", "tests1\tests1.csproj", "{1FA4F8B6-314A-47B0-8681-6E7DB3D9C766}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "tests", "tests\tests.csproj", "{1FA4F8B6-314A-47B0-8681-6E7DB3D9C766}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

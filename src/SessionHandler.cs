@@ -41,59 +41,6 @@ namespace QaKit.Yagr
 			_factory = factory;
 		}
 
-		private async Task<Caps> ReadCaps(HttpContext context)
-		{
-			var body = await ReadRequestBody(context);
-			_logger.LogDebug("Request: {0}", body);
-			
-			var capsJson = JsonDocument.Parse(body).RootElement;
-
-			var (caps, w3c) = (JsonDocument.Parse("{}").RootElement, false);
-
-			if (capsJson.TryGetProperty("desiredCapabilities", out var desiredCapabilities))
-			{
-				(caps, w3c) = (desiredCapabilities, false);
-			}
-			else if(capsJson.TryGetProperty("capabilities", out var w3cCapabilities)
-				&& w3cCapabilities.TryGetProperty("alwaysMatch", out var alwaysMatch))
-			{
-				(caps, w3c) = (alwaysMatch, true);
-			}
-
-			string capabilityJsonWireW3C(string jswKey, string w3cKey)
-			{
-				var k = w3c ? w3cKey : jswKey;
-				if (!caps.TryGetProperty(k, out var propElement)) return "";
-
-				switch (propElement.ValueKind)
-				{
-					case JsonValueKind.String:
-						return propElement.GetString();
-					case JsonValueKind.Object:
-						return string.Join(" ",
-							from prop in propElement.EnumerateObject()
-							select $"{prop.Name}={prop.Value.GetString()}");
-					default:
-						_logger.LogError("Failed to interpret {0} capability", k);
-						return "";
-				}
-			}
-
-			string GetCapability(string capKey) => capabilityJsonWireW3C(capKey, capKey);
-
-			return new Caps
-			{
-				browser = GetCapability("browserName") switch
-				{
-					"" => GetCapability("deviceName"),
-					string s  => s
-				},
-				version = capabilityJsonWireW3C("version", "browserVersion"),
-				platform = capabilityJsonWireW3C("platform", "platformName"),
-				labels = GetCapability("labels")
-			};
-		}
-
 		private static async Task<string> ReadRequestBody(HttpContext context)
 		{
 			context.Request.EnableBuffering();
@@ -130,7 +77,7 @@ namespace QaKit.Yagr
 
 			if (context.RequestAborted.IsCancellationRequested)
 			{
-				_logger.LogError("Session cancelled! {0}", sessionId);			
+				_logger.LogError("Session cancelled! {0}", sessionId);
 				_sessions.Remove(sessionId);
 				_registry.ReleaseHost(sessionData.Host);
 
@@ -167,7 +114,15 @@ namespace QaKit.Yagr
 			var retriesLeft = 3;
 			do
 			{
-				var caps = await ReadCaps(context);
+				var body = await ReadRequestBody(context);
+				_logger.LogDebug("Request: {0}", body);
+			
+				if (string.IsNullOrWhiteSpace(body))
+				{
+					_logger.LogDebug("Session request with empty body");
+				}
+
+				var caps = Caps.Parse(body, _logger);
 				_logger.LogInformation($"Requested caps: {JsonSerializer.Serialize(caps)}");
 
 				var host = await _registry.GetAvailableHost(caps);

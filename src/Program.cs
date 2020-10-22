@@ -1,17 +1,13 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Linq;
-using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
-using QaKit.Yagr.Controllers;
 using Serilog;
 
 namespace QaKit.Yagr
 {
-	public class Program
+    public class Program
 	{
 		public static IConfiguration Configuration
 		{
