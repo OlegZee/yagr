@@ -95,13 +95,13 @@ namespace QaKit.Yagr.Controllers
 
 		[HttpGet]
 		public async Task<StatusResponse> Get(
-			[FromServices] IHostsRegistry registry,
+			[FromServices] ILoadBalancer registry,
 			[FromServices] IHttpClientFactory factory,
 			[FromServices] ILogger<StatusController> logger)
 		{
-			var hostsConfig = registry.GetConfig();
+			var configHosts = registry.GetConfig();
 			
-			logger.LogInformation("STATUS request with {0} hosts configured", hostsConfig.Hosts.Count);
+			logger.LogInformation("STATUS request with {0} hosts configured", configHosts.Length);
 
 			using var client = factory.CreateClient("status");
 
@@ -119,7 +119,7 @@ namespace QaKit.Yagr.Controllers
 					logger.LogError("Error getting /STATUS from {0}: got {1}", statusUri, response.StatusCode);
 					return null;
 				}
-				catch (TaskCanceledException e)
+				catch (Exception e)
 				{
 					logger.LogError("Error getting /STATUS from {0}: {1}", statusUri, e.Message);
 					return null;
@@ -129,7 +129,7 @@ namespace QaKit.Yagr.Controllers
 			
 			var cts = new CancellationTokenSource(4000);
 			var responses = await Task.WhenAll(
-				from host in hostsConfig.Hosts
+				from host in configHosts
 				let statusUri = new Uri(new Uri(host.HostUri), "/status")
 				select GetStatus(statusUri, cts.Token)
 				);
