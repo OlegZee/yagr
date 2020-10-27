@@ -2,7 +2,6 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -60,14 +59,16 @@ namespace QaKit.Yagr
 
 		private async Task DeleteSession(string sessionId, Uri sessionEndpoint, CancellationToken cancel)
 		{
-			_logger.LogInformation("Sending DELETE request! {0}", sessionId);
-			
+		
 			using var client = _factory.CreateClient("delete");
 			var deleteSession = new Uri(sessionEndpoint, $"/session/{sessionId}");
 
+			_logger.LogInformation("Sending DELETE request! {0}", deleteSession);
+
 			try
 			{
-				await client.DeleteAsync(deleteSession, cancel);
+				var response = await client.DeleteAsync(deleteSession, cancel);
+				_logger.LogDebug("Completed DELETE request with {0} code.", response.StatusCode);
 			}
 			catch (Exception e)
 			{
@@ -77,8 +78,11 @@ namespace QaKit.Yagr
 
 		public async Task<HttpResponseMessage> HandleProxyRequest(HttpContext context)
 		{
-			if (context.Request.Path == "")
+			_logger.LogDebug($"New proxy '{context.Request.Method}' request '{context.Request.Path}'");
+
+			if (context.Request.Path == "" && context.Request.Method == "POST")
 			{
+				_logger.LogDebug($"Initiating new session");
 				return await ProcessSessionRequest(context);
 			}
 
@@ -86,9 +90,12 @@ namespace QaKit.Yagr
 			var sessionId = ParseSessionId(context.Request.Path);
 			if (!_sessions.TryGetValue(sessionId, out var sessionData))
 			{
-				throw new Exception("invalid session id");
+				_logger.LogDebug($"Failed to find session '{sessionId}', unknown request");
+				// throw new Exception("invalid session id");
+				return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
 			}
 
+			_logger.LogDebug($"Forwarding request to {sessionData.Endpoint}");
 			var response = await context
 				.ForwardTo(sessionData.Endpoint)
 				.AddXForwardedHeaders()
@@ -96,7 +103,7 @@ namespace QaKit.Yagr
 
 			if (context.RequestAborted.IsCancellationRequested)
 			{
-				_logger.LogError("Session cancelled! {0}", sessionId);
+				_logger.LogError($"Session cancelled! {sessionId}");
 				_sessions.Remove(sessionId);
 				sessionData.Worker.Dispose();
 				// TODO consider _registry.ReleaseHost(sessionData.Host)
@@ -113,7 +120,7 @@ namespace QaKit.Yagr
 					
 				_sessions.Remove(sessionId);
 				sessionData.Worker.Dispose();
-				_logger.LogInformation("Closed session: {0} on host `{1}`", sessionId, sessionData.Endpoint);
+				_logger.LogInformation($"Closed session: {sessionId} on host '{sessionData.Endpoint}'");
 				// TODO consider _registry.ReleaseHost(sessionData.Host) instead of Dispose
 			}
 			return response;
@@ -149,7 +156,7 @@ namespace QaKit.Yagr
 					var sessionId = seleniumResponse.RootElement.GetProperty("value").GetProperty("sessionId")
 						.GetString();
 
-					_logger.LogInformation("New session: {0} on host `{1}`", sessionId, worker.Host);
+					_logger.LogInformation($"New session: {sessionId} on host '{worker.Host}'");
 					_sessions.Add(sessionId, new SessionData(sessionEndpoint, worker));
 				}
 				else if (--retriesLeft <= 0)

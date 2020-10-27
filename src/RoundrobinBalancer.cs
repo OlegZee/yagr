@@ -60,23 +60,19 @@ namespace QaKit.Yagr
 		private readonly IHttpClientFactory _clientFactory;
 
 		private ConcurrentDictionary<Uri,HostInfo> _runningHosts = new ConcurrentDictionary<Uri,HostInfo>();
-		private volatile bool _shutdownInProgress;
 
+		public IEnumerable<Uri> RunningHosts => _runningHosts.Keys;
 		public RoundRobinBalancer(ILogger<RoundRobinBalancer> logger, IHttpClientFactory clientFactory)
 		{
 			_logger = logger;
 			_clientFactory = clientFactory;
 		}
 
-		public async Task<bool> RestartHost(HostConfig config)
+		public async Task<bool> AddHost(HostConfig config)
 		{
-			if(_shutdownInProgress)
-			{
-				_logger.LogWarning($"Attempt to start '{config.HostUri}' while shutdown is in progress.");
-				return false;
-			}
 			var hostUri = new Uri(config.HostUri);
 			await DeleteHost(hostUri);
+			_logger.LogInformation($"(Re)starting host '{hostUri}'");
 
 			// start or updates tasks for a specific host
 			var cts = new CancellationTokenSource();
@@ -110,60 +106,6 @@ namespace QaKit.Yagr
 				return true;
 			}
 			return false;
-		}
-
-		public async Task Start(HostConfig[] hostConfigs)
-		{
-			_logger.LogInformation("Starting load balancer");
-			_logger.LogInformation("{0} routers configured", hostConfigs.Length);
-
-			var checkAliveCli = _clientFactory.CreateClient("checkalive");
-			var tasks = from h in hostConfigs let uri = new Uri(h.HostUri) select IsHostAlive(uri, checkAliveCli).ContinueWith(task => task.Result ? uri : null);
-			var aliveUris = (from uri in Task.WhenAll(tasks).Result where uri != null select uri).ToList();
-
-			Predicate<string> isAlive = uri => aliveUris.Exists(ah => ah == new Uri(uri));
-
-			if (aliveUris.Count() != hostConfigs.Length)
-			{
-				var deadHosts = from h in hostConfigs where !isAlive(h.HostUri) select h.HostUri;
-
-				_logger.LogWarning("Hosts appears not available: {0}", 
-					string.Join(", ", (from h in deadHosts select h.ToString()).ToArray()));
-			}
-			// TODO let lifecycle service to monitor hosts
-			var aliveHosts = from h in hostConfigs where isAlive(h.HostUri) select h;
-			await Task.WhenAll(aliveHosts.Select(host => RestartHost(host)));
-		}
-
-		/// Forcefully cancels the running sessions
-		public async Task Shutdown()
-		{
-			_logger.LogInformation("Stopping load balancer");
-			_shutdownInProgress = true;
-			
-			var runningHosts = _runningHosts.Keys;
-			await Task.WhenAll(
-				runningHosts.Select(host => DeleteHost(host))
-				);
-
-			// TODO graceful/forceful shutdown
-			// _logger.LogError("Forceful shutdown is not implemented yet");
-			_shutdownInProgress = false;
-		}
-
-		private static async Task<bool> IsHostAlive(Uri host, HttpClient client)
-		{
-			var cts = new CancellationTokenSource(2000);
-			try
-			{
-				var statusUri = new Uri(host, "/status");
-				var response = await client.GetAsync(statusUri, cts.Token);
-				return response.IsSuccessStatusCode;
-			}
-			catch
-			{
-				return false;
-			}
 		}
 
 		public async Task<Worker> GetNext(Request req)

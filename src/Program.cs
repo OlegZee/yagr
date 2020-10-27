@@ -31,19 +31,20 @@ namespace QaKit.Yagr
 				.Enrich.FromLogContext()
 				.Enrich.WithProperty("SourceContext", "")
 				.WriteTo.Debug()
-//				.WriteTo.Console(
-//					restrictedToMinimumLevel: LogEventLevel.Information,
-//					theme: AnsiConsoleTheme.Code
-//					// {Properties:j} added:
-////					outputTemplate: "\\\\{SourceContext:l}\\\\ [{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj} " +
-////					                "{Properties:j}{NewLine}{Exception}"
-//				)
 				.CreateLogger();
 
 			try
 			{
 				Log.Information("Starting web host");
-				CreateHostBuilder(args).Build().Run();
+				var host = CreateHostBuilder(args).Build();
+				Console.CancelKeyPress += (sender, args) => {
+					args.Cancel = false;
+					Log.Logger.Warning("Termination initiated");
+					// TODO
+					// var balancer = (ILoadBalancer)host.Services.GetService(typeof(ILoadBalancer));
+					// balancer.Shutdown().Wait();
+				};
+				host.Run();
 				return 0;
 			}
 			catch (Exception ex)

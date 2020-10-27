@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -29,8 +30,10 @@ namespace QaKit.Yagr
 	public interface ILoadBalancer
 	{
 		Task<Worker> GetNext(Request req);
-		Task Start(HostConfig[] hostConfigs);
-		Task Shutdown();
+		Task<bool> AddHost(HostConfig config);
+		Task<bool> DeleteHost(Uri config);
+		
+		IEnumerable<Uri> RunningHosts { get; }
 
 		HostConfig[] GetConfig();
 	}
