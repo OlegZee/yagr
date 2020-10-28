@@ -17,21 +17,40 @@ namespace QaKit.Yagr
 		private readonly ILoadBalancer _balancer;
 		private readonly IHttpClientFactory _clientFactory;
 		private readonly ILogger<BalancerLifecycleService> _logger;
+		private readonly SessionHandler _sessionHandler;
+
+		private readonly CancellationTokenSource _watchdogsCts = new CancellationTokenSource();
+		private readonly IList<Task> _watchdogs = new List<Task>();
 
 		public BalancerLifecycleService(IOptionsMonitor<RouterConfig> configOptions,
 			ILoadBalancer balancer,
 			IHttpClientFactory clientFactory,
-			ILogger<BalancerLifecycleService> logger)
+			ILogger<BalancerLifecycleService> logger,
+			SessionHandler sessionHandler
+			)
 		{
 			_configOptions = configOptions;
 			_balancer = balancer;
 			_clientFactory = clientFactory;
 			_logger = logger;
-
+			_sessionHandler = sessionHandler;
 			configOptions.OnChange(_ => {
 				_logger.LogInformation($"Config has changed");
 				ReloadConfiguration();
 			});
+		}
+
+		public async Task ExpiredSessionsWatchdog(CancellationToken cancel)
+		{
+			try
+			{
+				while(!cancel.IsCancellationRequested)
+				{
+					await _sessionHandler.CleanupExpiredSessions();
+					await Task.Delay(1000, cancel);
+				}
+			}
+			catch (TaskCanceledException) {}
 		}
 
 		private void ReloadConfiguration()
@@ -59,6 +78,9 @@ namespace QaKit.Yagr
 		{
 			_logger.LogInformation("Starting services");
 			await SyncConfig(cancellationToken);
+			_watchdogs.Add(
+				ExpiredSessionsWatchdog(_watchdogsCts.Token)
+			);
 		}
 
 		private async Task SyncConfig(CancellationToken cancellationToken)
@@ -68,7 +90,9 @@ namespace QaKit.Yagr
 			var newHosts = newConfig.Hosts.ToDictionary(c => new Uri(c.HostUri), c => c);
 
 			var hostsStatus = await CheckAliveStatus(from h in newConfig.Hosts select h.HostUri);
-			Predicate<Uri> isAlive = uri => hostsStatus.TryGetValue(uri, out var x) && x;
+			Predicate<Uri> isAlive = uri =>
+				hostsStatus.TryGetValue(uri, out var x) && x
+				&& newHosts.TryGetValue(uri, out var config) && config.Limit > 0;
 
 			var toBeRemoved = 
 				(from host in runningHosts.Keys
@@ -120,10 +144,14 @@ namespace QaKit.Yagr
 		public async Task StopAsync(CancellationToken cancellationToken)
 		{
 			_logger.LogInformation("Stopping services");
+			_watchdogsCts.Cancel();
+
 			var configs = _balancer.RunningHosts;
 			await Task.WhenAll(
 				configs.Select(host => _balancer.DeleteHost(host))
+				.Concat(_watchdogs)
 				);
+			_watchdogs.Clear();
 		}
 	}
 }

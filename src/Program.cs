@@ -7,7 +7,7 @@ using Serilog;
 
 namespace QaKit.Yagr
 {
-    public class Program
+	public class Program
 	{
 		public static IConfiguration Configuration
 		{

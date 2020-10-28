@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -22,13 +23,24 @@ namespace QaKit.Yagr
 				Endpoint = endpoint;
 				Host = new UpstreamHost(endpoint.AbsoluteUri);
 				Worker = worker;
+				// TODO customizable timespan
+				Timeout = TimeSpan.FromSeconds(30);
+				Touch();
 			}
 
 			public Uri Endpoint { get; }
 			public UpstreamHost Host { get; }
 			public Worker Worker { get; }
+			public DateTimeOffset ExpiresAfter { get; private set; }
+			public TimeSpan Timeout {get; private set; }
+
+			public void Touch()
+			{
+				// TODO sync access System.DateTimeOffset.UtcNow
+				ExpiresAfter = DateTimeOffset.UtcNow + Timeout;
+			}
 		}
-		
+
 		private readonly ILogger<SessionHandler> _logger;
 		private readonly ILoadBalancer _balancer;
 		private readonly IHttpClientFactory _factory;
@@ -57,9 +69,8 @@ namespace QaKit.Yagr
 			return body;
 		}
 
-		private async Task DeleteSession(string sessionId, Uri sessionEndpoint, CancellationToken cancel)
+		private async Task RemoteDeleteSession(string sessionId, Uri sessionEndpoint, CancellationToken cancel)
 		{
-		
 			using var client = _factory.CreateClient("delete");
 			var deleteSession = new Uri(sessionEndpoint, $"/session/{sessionId}");
 
@@ -100,7 +111,9 @@ namespace QaKit.Yagr
 				.ForwardTo(sessionData.Endpoint)
 				.AddXForwardedHeaders()
 				.Send();
+			sessionData.Touch();
 
+			// TODO the session might have been deleted by that time, do nothing?
 			if (context.RequestAborted.IsCancellationRequested)
 			{
 				_logger.LogError($"Session cancelled! {sessionId}");
@@ -109,7 +122,7 @@ namespace QaKit.Yagr
 				// TODO consider _registry.ReleaseHost(sessionData.Host)
 
 				var cts = new CancellationTokenSource(4000);
-				await DeleteSession(sessionId, sessionData.Endpoint, cts.Token);
+				await RemoteDeleteSession(sessionId, sessionData.Endpoint, cts.Token);
 			}
 			if (context.Request.Method == "DELETE")
 			{
@@ -124,6 +137,26 @@ namespace QaKit.Yagr
 				// TODO consider _registry.ReleaseHost(sessionData.Host) instead of Dispose
 			}
 			return response;
+		}
+
+		public async Task CleanupExpiredSessions()
+		{
+			var cts = new CancellationTokenSource(4000);
+
+			var now = DateTimeOffset.UtcNow;
+			var expired = (from pair in _sessions
+				where now > pair.Value.ExpiresAfter
+				select new { sessionId = pair.Key, endPoint = pair.Value.Endpoint, worker = pair.Value.Worker, expires = pair.Value.ExpiresAfter }
+				).ToList();
+			if (!expired.Any()) return;
+
+			expired.ForEach(s => {
+				_logger.LogWarning($"Removing expired session {s.sessionId}, expired {s.expires}");
+				_sessions.Remove(s.sessionId);
+				s.worker.Dispose();
+			});
+
+			await Task.WhenAll(from e in expired select RemoteDeleteSession(e.sessionId, e.endPoint, cts.Token));
 		}
 
 		private async Task<HttpResponseMessage> ProcessSessionRequest(HttpContext context)
