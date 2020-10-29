@@ -34,7 +34,8 @@ namespace QaKit.Yagr
 			_clientFactory = clientFactory;
 			_logger = logger;
 			_sessionHandler = sessionHandler;
-			configOptions.OnChange(_ => {
+			configOptions.OnChange(_ =>
+			{
 				_logger.LogInformation($"Config has changed");
 				ReloadConfiguration();
 			});
@@ -42,15 +43,15 @@ namespace QaKit.Yagr
 
 		public async Task ExpiredSessionsWatchdog(CancellationToken cancel)
 		{
-			try
+			while (!cancel.IsCancellationRequested)
 			{
-				while(!cancel.IsCancellationRequested)
+				try
 				{
 					await _sessionHandler.CleanupExpiredSessions();
 					await Task.Delay(1000, cancel);
 				}
+				catch (TaskCanceledException) { break; }
 			}
-			catch (TaskCanceledException) {}
 		}
 
 		private void ReloadConfiguration()
@@ -73,7 +74,7 @@ namespace QaKit.Yagr
 				return false;
 			}
 		}
-	
+
 		public async Task StartAsync(CancellationToken cancellationToken)
 		{
 			_logger.LogInformation("Starting services");
@@ -94,14 +95,14 @@ namespace QaKit.Yagr
 				hostsStatus.TryGetValue(uri, out var x) && x
 				&& newHosts.TryGetValue(uri, out var config) && config.Limit > 0;
 
-			var toBeRemoved = 
+			var toBeRemoved =
 				(from host in runningHosts.Keys
-				where !newHosts.ContainsKey(host) || !isAlive(host)
-				select host).ToArray();
+				 where !newHosts.ContainsKey(host) || !isAlive(host)
+				 select host).ToArray();
 			var toBeStarted =
 				(from host in newHosts.Keys
-				where (!runningHosts.ContainsKey(host) || !areConfigsEqual(newHosts[host], runningHosts[host])) && isAlive(host)
-				select host).ToArray();
+				 where (!runningHosts.ContainsKey(host) || !areConfigsEqual(newHosts[host], runningHosts[host])) && isAlive(host)
+				 select host).ToArray();
 
 			// remove if none of changes
 			_logger.LogInformation("{0} routers in config, {1} are alive", newConfig.Hosts.Count, hostsStatus.Count(p => p.Value == true));
@@ -134,8 +135,9 @@ namespace QaKit.Yagr
 		{
 			var checkAliveCli = _clientFactory.CreateClient("checkalive");
 			var result = await Task.WhenAll(
-				from h in hosts let uri = new Uri(h)
-				select IsHostAlive(uri, checkAliveCli).ContinueWith(task => new { uri = uri, alive = task.Result})
+				from h in hosts
+				let uri = new Uri(h)
+				select IsHostAlive(uri, checkAliveCli).ContinueWith(task => new { uri = uri, alive = task.Result })
 			);
 			var hostsStatus = result.ToDictionary(v => v.uri, v => v.alive);
 			return hostsStatus;
@@ -149,6 +151,7 @@ namespace QaKit.Yagr
 			var configs = _balancer.RunningHosts;
 			await Task.WhenAll(
 				configs.Select(host => _balancer.DeleteHost(host))
+				.Concat(new[] { _sessionHandler.TerminateAllSessions(cancellationToken) })
 				.Concat(_watchdogs)
 				);
 			_watchdogs.Clear();

@@ -33,18 +33,10 @@ namespace QaKit.Yagr
 				.WriteTo.Debug()
 				.CreateLogger();
 
+			Log.Information("Starting web host");
 			try
 			{
-				Log.Information("Starting web host");
-				var host = CreateHostBuilder(args).Build();
-				Console.CancelKeyPress += (sender, args) => {
-					args.Cancel = false;
-					Log.Logger.Warning("Termination initiated");
-					// TODO
-					// var balancer = (ILoadBalancer)host.Services.GetService(typeof(ILoadBalancer));
-					// balancer.Shutdown().Wait();
-				};
-				host.Run();
+				CreateHostBuilder(args).Build().Run();
 				return 0;
 			}
 			catch (Exception ex)

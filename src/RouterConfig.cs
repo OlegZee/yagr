@@ -1,8 +1,9 @@
+using System;
 using System.Collections.Generic;
 
 namespace QaKit.Yagr
 {
-		public class VersionInfo
+	public class VersionInfo
 	{
 		public string Number { get; set; } = "";
 		public string Platform { get; set; } = "";
@@ -20,7 +21,6 @@ namespace QaKit.Yagr
 	{
 		public string HostUri { get; set; } = "";
 		public int Limit { get; set; }
-		public uint Weight { get; set; }
 		
 		public List<BrowsersInfo> Browsers { get; } = new List<BrowsersInfo>();
 	}
@@ -28,7 +28,13 @@ namespace QaKit.Yagr
 	public class RouterConfig
 	{
 		public List<HostConfig> Hosts { get; } = new List<HostConfig>();
-		public int SessionsLimit { get; set; }
+
+		public TimeSpan Timeout { get; set; } = new TimeSpan(0, 0, 60);
+		public TimeSpan MaxTimeout { get; set; } = new TimeSpan(1, 0, 0);
+
+		public int SessionRetryCount { get; set; } = 3;
+		public TimeSpan SessionRetryTimeout { get; set; } = new TimeSpan(0, 0, 30);
+
 	}
 
 }

@@ -13,6 +13,8 @@ namespace QaKit.Yagr
 {
 	public class RoundRobinBalancer: ILoadBalancer
 	{
+		const int MaxWorkerPerHost = 100;
+
 		private static readonly TimeSpan WaitStoppingHostTimeout = TimeSpan.FromSeconds(30); // TODO to config
 
 		private class Ticket
@@ -144,14 +146,20 @@ namespace QaKit.Yagr
 
 		private Task[] StartHost(HostConfig config, CancellationToken cancel)
 		{
+			var hostUri = new Uri(config.HostUri);
+			var limit = Math.Min(Math.Max(1, config.Limit), MaxWorkerPerHost);
+
+			var processingPool = Array.ConvertAll(
+				new int[limit],
+				_ => HostWorker(hostUri, ticket => CapsExt.FulfilCaps(config, ticket.Caps), cancel));
+			return processingPool;
+		}
+
+		async Task HostWorker(Uri hostUri, Func<Ticket,Caps?> canProcess, CancellationToken cancel)
+		{
 			var inputQueue = _queue.Reader;
-			async Task HostWorker()
+			try
 			{
-				var hostUri = new Uri(config.HostUri);
-				Caps? canProcess(Ticket ticket)
-				{
-					return CapsExt.FulfilCaps(config, ticket.Caps);
-				}
 				while(!cancel.IsCancellationRequested)
 				{
 					if(LookForDeniedTickets(canProcess, out var deniedTicket, out var hostCaps))
@@ -174,13 +182,12 @@ namespace QaKit.Yagr
 						}
 					}
 				}
-				// queue is empty, quit the worker
 			}
-
-			var processingPool = Array.ConvertAll(
-				new int[Math.Max(1, config.Limit)],
-				_ => HostWorker());
-			return processingPool;
+			catch (TaskCanceledException)
+			{
+				_logger.LogWarning($"Worker for '{hostUri}' cancelled");
+			}
+			// queue is empty, quit the worker
 		}
 	}
 }
