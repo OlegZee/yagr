@@ -38,9 +38,9 @@ namespace QaKit.Yagr
 			}
 		}
 
-		private class HostInfo
+		private class HostData
 		{
-			public HostInfo(Uri hostUri, HostConfig config, CancellationTokenSource cts, Task[] runners)
+			public HostData(Uri hostUri, HostConfig config, CancellationTokenSource cts, Task[] runners)
 			{
 				HostUri = hostUri;
 				Config = config;
@@ -61,9 +61,9 @@ namespace QaKit.Yagr
 		private readonly ILogger<RoundRobinBalancer> _logger;
 		private readonly IHttpClientFactory _clientFactory;
 
-		private ConcurrentDictionary<Uri,HostInfo> _runningHosts = new ConcurrentDictionary<Uri,HostInfo>();
+		private ConcurrentDictionary<Uri,HostData> _runningHosts = new ConcurrentDictionary<Uri,HostData>();
 
-		public IEnumerable<Uri> RunningHosts => _runningHosts.Keys;
+		public IEnumerable<Uri> RunningHosts => _runningHosts.Keys.ToList();
 		public RoundRobinBalancer(ILogger<RoundRobinBalancer> logger, IHttpClientFactory clientFactory)
 		{
 			_logger = logger;
@@ -78,7 +78,7 @@ namespace QaKit.Yagr
 
 			// start or updates tasks for a specific host
 			var cts = new CancellationTokenSource();
-			var hostInfo = new HostInfo(hostUri, config, cts, StartHost(config, cts.Token));
+			var hostInfo = new HostData(hostUri, config, cts, StartHost(config, cts.Token));
 
 			// TODO sync access
 			_runningHosts.TryAdd(hostUri, hostInfo);

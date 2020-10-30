@@ -11,6 +11,7 @@ using Microsoft.Extensions.Options;
 
 namespace QaKit.Yagr
 {
+
 	public class BalancerLifecycleService : IHostedService
 	{
 		private readonly IOptionsMonitor<RouterConfig> _configOptions;
@@ -21,6 +22,8 @@ namespace QaKit.Yagr
 
 		private readonly CancellationTokenSource _watchdogsCts = new CancellationTokenSource();
 		private readonly IList<Task> _watchdogs = new List<Task>();
+
+		private readonly AutoResetEvent _triggerReloadConfig = new AutoResetEvent(false);
 
 		public BalancerLifecycleService(IOptionsMonitor<RouterConfig> configOptions,
 			ILoadBalancer balancer,
@@ -37,7 +40,7 @@ namespace QaKit.Yagr
 			configOptions.OnChange(_ =>
 			{
 				_logger.LogInformation($"Config has changed");
-				ReloadConfiguration();
+				_triggerReloadConfig.Set();
 			});
 		}
 
@@ -54,24 +57,19 @@ namespace QaKit.Yagr
 			}
 		}
 
-		private void ReloadConfiguration()
+		public async Task HostReconfigWatchdog(CancellationToken cancel)
 		{
-			var updateCts = new CancellationTokenSource();
-			SyncConfig(updateCts.Token).ConfigureAwait(false);
-		}
+			while (!cancel.IsCancellationRequested)
+			{
+				try
+				{
+					var awaitInterval = _configOptions.CurrentValue.CheckAliveInterval;
 
-		private static async Task<bool> IsHostAlive(Uri host, HttpClient client)
-		{
-			var cts = new CancellationTokenSource(2000);
-			try
-			{
-				var statusUri = new Uri(host, "/status");
-				var response = await client.GetAsync(statusUri, cts.Token);
-				return response.IsSuccessStatusCode;
-			}
-			catch
-			{
-				return false;
+					await SyncConfig(cancel);
+					await Task.WhenAny(Task.Delay(awaitInterval, cancel), _triggerReloadConfig.AsTask());
+					_triggerReloadConfig.Reset();
+				}
+				catch (TaskCanceledException) { break; }
 			}
 		}
 
@@ -82,6 +80,9 @@ namespace QaKit.Yagr
 			_watchdogs.Add(
 				ExpiredSessionsWatchdog(_watchdogsCts.Token)
 			);
+			_watchdogs.Add(
+				HostReconfigWatchdog(_watchdogsCts.Token)
+			);
 		}
 
 		private async Task SyncConfig(CancellationToken cancellationToken)
@@ -90,7 +91,10 @@ namespace QaKit.Yagr
 			var newConfig = _configOptions.CurrentValue;
 			var newHosts = newConfig.Hosts.ToDictionary(c => new Uri(c.HostUri), c => c);
 
-			var hostsStatus = await CheckAliveStatus(from h in newConfig.Hosts select h.HostUri);
+			// TODO optimize alive-ness request
+			// var consideredAlive = _sessionHandler.GetAliveHosts(DateTimeOffset.Now - TimeSpan.FromSeconds(30));
+
+			var hostsStatus = await CheckAliveStatus(from h in newConfig.Hosts select new Uri(h.HostUri));
 			Predicate<Uri> isAlive = uri =>
 				hostsStatus.TryGetValue(uri, out var x) && x
 				&& newHosts.TryGetValue(uri, out var config) && config.Limit > 0;
@@ -104,8 +108,10 @@ namespace QaKit.Yagr
 				 where (!runningHosts.ContainsKey(host) || !areConfigsEqual(newHosts[host], runningHosts[host])) && isAlive(host)
 				 select host).ToArray();
 
-			// remove if none of changes
-			_logger.LogInformation("{0} routers in config, {1} are alive", newConfig.Hosts.Count, hostsStatus.Count(p => p.Value == true));
+			if (toBeRemoved.Any() || toBeStarted.Any())
+			{
+				_logger.LogInformation("Detected changes in configuration or availability of the hosts");
+			}
 
 			await Task.WhenAll(
 				from host in toBeRemoved
@@ -131,15 +137,29 @@ namespace QaKit.Yagr
 			return json1 == json2;
 		}
 
-		private async Task<IDictionary<Uri, bool>> CheckAliveStatus(IEnumerable<string> hosts)
+		private async Task<IDictionary<Uri, bool>> CheckAliveStatus(IEnumerable<Uri> hosts)
 		{
-			var checkAliveCli = _clientFactory.CreateClient("checkalive");
+			async Task<bool> Kick(Uri endpoint, HttpClient client, CancellationToken cancel)
+			{
+				try
+				{
+					return (await client.GetAsync(endpoint, cancel)).IsSuccessStatusCode;
+				}
+				catch (Exception)
+				{
+					return false;
+				}
+			}
+
+			using var httpCli = _clientFactory.CreateClient("checkalive");
+			using var cts = new CancellationTokenSource(2000);
+
 			var result = await Task.WhenAll(
-				from h in hosts
-				let uri = new Uri(h)
-				select IsHostAlive(uri, checkAliveCli).ContinueWith(task => new { uri = uri, alive = task.Result })
+				from host in hosts
+				let statusUri = new Uri(host, "status")
+				select Kick(statusUri, httpCli, cts.Token).ContinueWith(task => new { host = host, alive = task.Result })
 			);
-			var hostsStatus = result.ToDictionary(v => v.uri, v => v.alive);
+			var hostsStatus = result.ToDictionary(v => v.host, v => v.alive);
 			return hostsStatus;
 		}
 

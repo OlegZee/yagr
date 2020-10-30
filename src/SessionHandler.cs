@@ -21,16 +21,18 @@ namespace QaKit.Yagr
 
 		private class SessionData
 		{
-			public SessionData(Uri endpoint, Worker worker, TimeSpan sessionTimeout)
+			public SessionData(Uri upstream, Uri hostUri, Worker worker, TimeSpan sessionTimeout)
 			{
-				Endpoint = endpoint;
-				Host = new UpstreamHost(endpoint.AbsoluteUri);
+				Upstream = upstream;
+				HostUri = hostUri;
+				UpstreamHost = new UpstreamHost(upstream.AbsoluteUri);
 				Worker = worker;
 				Timeout = sessionTimeout;
 			}
 
-			public Uri Endpoint { get; }
-			public UpstreamHost Host { get; }
+			public Uri Upstream { get; }
+			public Uri HostUri { get; }
+			public UpstreamHost UpstreamHost { get; }
 			public Worker Worker { get; }
 			public TimeSpan Timeout {get; }
 
@@ -42,6 +44,7 @@ namespace QaKit.Yagr
 		private readonly IHttpClientFactory _factory;
 		private readonly IDictionary<string, SessionData> _sessions = new ConcurrentDictionary<string, SessionData>();
 		private readonly ConcurrentDictionary<string, DateTimeOffset> _sessionsExpires = new ConcurrentDictionary<string, DateTimeOffset>();
+		private readonly ConcurrentDictionary<Uri, DateTimeOffset> _lastHostAccess = new ConcurrentDictionary<Uri, DateTimeOffset>();
 		private readonly object _expiryCleanupLock = new object();
 		
 		public SessionHandler(ILogger<SessionHandler> logger, ILoadBalancer balancer, IHttpClientFactory factory, IOptions<RouterConfig> routerConfig)
@@ -50,8 +53,6 @@ namespace QaKit.Yagr
 			_balancer = balancer;
 			_factory = factory;
 			_routerConfig = routerConfig;
-
-			_logger.LogWarning($"Timeout configured: '{_routerConfig.Value.Timeout}', '{_routerConfig.Value.MaxTimeout}'");
 		}
 
 		private static async Task<string> ReadRequestBody(HttpContext context)
@@ -102,16 +103,14 @@ namespace QaKit.Yagr
 			if (!_sessions.TryGetValue(sessionId, out var sessionData))
 			{
 				_logger.LogDebug($"Failed to find session '{sessionId}', unknown request");
-				// throw new Exception("invalid session id");
 				return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
 			}
 
-			_logger.LogDebug($"Forwarding request to {sessionData.Endpoint}");
+			_logger.LogDebug($"Forwarding request to {sessionData.Upstream}");
 			var response = await context
-				.ForwardTo(sessionData.Endpoint)
+				.ForwardTo(sessionData.Upstream)
 				.AddXForwardedHeaders()
 				.Send();
-			Touch(sessionId);
 
 			// TODO the session might have been deleted by that time, do nothing?
 			if (context.RequestAborted.IsCancellationRequested)
@@ -120,17 +119,21 @@ namespace QaKit.Yagr
 				_logger.LogError($"Session cancelled! {sessionId}");
 
 				using var cts = new CancellationTokenSource(DeleteSessionTimeoutMs);
-				await RemoteDeleteSession(sessionId, sessionData.Endpoint, cts.Token);
+				await RemoteDeleteSession(sessionId, sessionData.Upstream, cts.Token);
 			}
-			if (context.Request.Method == "DELETE")
+			else if (context.Request.Method == "DELETE")
 			{
 				if (!response.IsSuccessStatusCode)
 				{
-					_logger.LogError("DELETE '{0}' query for {1} session failed", sessionData.Endpoint, sessionId);
+					_logger.LogError("DELETE '{0}' query for {1} session failed", sessionData.Upstream, sessionId);
 				}
 					
 				ReleaseSession(sessionId);
-				_logger.LogInformation($"Closed session: {sessionId} on host '{sessionData.Endpoint}'");
+				_logger.LogInformation($"Closed session: {sessionId} on host '{sessionData.Upstream}'");
+			}
+			else
+			{
+				Touch(sessionId, sessionData.HostUri);
 			}
 			return response;
 		}
@@ -145,14 +148,17 @@ namespace QaKit.Yagr
 			}
 		}
 
-		private void Touch(string sessionId)
+		private void Touch(string sessionId, Uri host)
 		{
 			if (_sessions.TryGetValue(sessionId, out var sessionData))
 			{
+				var now = DateTimeOffset.UtcNow;
+				var expireTime = now + sessionData.Timeout;
+
 				lock(_expiryCleanupLock) {
-					var expireTime = DateTimeOffset.UtcNow + sessionData.Timeout;
 					_sessionsExpires.AddOrUpdate(sessionId, expireTime, (_, _1) => expireTime);
 				}
+				_lastHostAccess.AddOrUpdate(host, now, (_, _1) => now);
 			}
 		}
 
@@ -171,7 +177,7 @@ namespace QaKit.Yagr
 				expired = (from pair in _sessions
 					let sessionId = pair.Key
 					where expiredSessions.Contains(sessionId)
-					select Tuple.Create(sessionId, pair.Value.Endpoint, _sessionsExpires[sessionId])
+					select Tuple.Create(sessionId, pair.Value.Upstream, _sessionsExpires[sessionId])
 					).ToList();
 				expiredSessions.ToList().ForEach(sessionId =>
 					_sessionsExpires.TryRemove(sessionId, out var _)
@@ -192,12 +198,21 @@ namespace QaKit.Yagr
 		{
 			var sessions = (from pair in _sessions
 				let sessionId = pair.Key
-				select new { sessionId, endpoint = pair.Value.Endpoint }
+				select new { sessionId, endpoint = pair.Value.Upstream }
 				).ToList();
 			if (!sessions.Any()) return Task.CompletedTask;
 
 			sessions.ForEach(i => ReleaseSession(i.sessionId));
 			return Task.WhenAll(from i in sessions select RemoteDeleteSession(i.sessionId, i.endpoint, cancel));
+		}
+
+		// Gets the list of hosts that router successfully communicated with after specified moment of time
+		public IEnumerable<Uri> GetAliveHosts(DateTimeOffset when)
+		{
+			return (
+				from pair in _lastHostAccess
+				where pair.Value > when
+				select pair.Key).ToList();
 		}
 
 		private async Task<HttpResponseMessage> ProcessSessionRequest(HttpContext context)
@@ -235,8 +250,8 @@ namespace QaKit.Yagr
 						.GetString();
 
 					_logger.LogInformation($"New session: {sessionId} on host '{worker.Host}'");
-					_sessions.Add(sessionId, new SessionData(sessionEndpoint, worker, sessionTimeout));
-					Touch(sessionId);
+					_sessions.Add(sessionId, new SessionData(sessionEndpoint, worker.Host, worker, sessionTimeout));
+					Touch(sessionId, worker.Host);
 					return initResponse;
 				}
 				else if (--retriesLeft <= 0)
