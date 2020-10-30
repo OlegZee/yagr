@@ -1,12 +1,8 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Linq;
-using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
-using QaKit.Yagr.Controllers;
 using Serilog;
 
 namespace QaKit.Yagr
@@ -35,18 +31,11 @@ namespace QaKit.Yagr
 				.Enrich.FromLogContext()
 				.Enrich.WithProperty("SourceContext", "")
 				.WriteTo.Debug()
-//				.WriteTo.Console(
-//					restrictedToMinimumLevel: LogEventLevel.Information,
-//					theme: AnsiConsoleTheme.Code
-//					// {Properties:j} added:
-////					outputTemplate: "\\\\{SourceContext:l}\\\\ [{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj} " +
-////					                "{Properties:j}{NewLine}{Exception}"
-//				)
 				.CreateLogger();
 
+			Log.Information("Starting web host");
 			try
 			{
-				Log.Information("Starting web host");
 				CreateHostBuilder(args).Build().Run();
 				return 0;
 			}

@@ -6,89 +6,53 @@ using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using ProxyKit;
 
 namespace QaKit.Yagr
 {
 	public class SessionHandler : IProxyHandler
 	{
+		private const int DeleteSessionTimeoutMs = 4000;
+
 		private class SessionData
 		{
-			public SessionData(Uri endpoint, UpstreamHost host)
+			public SessionData(Uri upstream, Uri hostUri, Worker worker, TimeSpan sessionTimeout)
 			{
-				Endpoint = endpoint;
-				Host = host;
+				Upstream = upstream;
+				HostUri = hostUri;
+				UpstreamHost = new UpstreamHost(upstream.AbsoluteUri);
+				Worker = worker;
+				Timeout = sessionTimeout;
 			}
 
-			public Uri Endpoint { get; }
-			public UpstreamHost Host { get; }
-		}
-		
-		private readonly ILogger<SessionHandler> _logger;
-		private readonly IHostsRegistry _registry;
+			public Uri Upstream { get; }
+			public Uri HostUri { get; }
+			public UpstreamHost UpstreamHost { get; }
+			public Worker Worker { get; }
+			public TimeSpan Timeout {get; }
 
+		}
+
+		private readonly IOptions<RouterConfig> _routerConfig;
+		private readonly ILogger<SessionHandler> _logger;
+		private readonly ILoadBalancer _balancer;
+		private readonly IHttpClientFactory _factory;
 		private readonly IDictionary<string, SessionData> _sessions = new ConcurrentDictionary<string, SessionData>();
+		private readonly ConcurrentDictionary<string, DateTimeOffset> _sessionsExpires = new ConcurrentDictionary<string, DateTimeOffset>();
+		private readonly ConcurrentDictionary<Uri, DateTimeOffset> _lastHostAccess = new ConcurrentDictionary<Uri, DateTimeOffset>();
+		private readonly object _expiryCleanupLock = new object();
 		
-		public SessionHandler(ILogger<SessionHandler> logger, IHostsRegistry registry)
+		public SessionHandler(ILogger<SessionHandler> logger, ILoadBalancer balancer, IHttpClientFactory factory, IOptions<RouterConfig> routerConfig)
 		{
 			_logger = logger;
-			_registry = registry;
-		}
-
-		private async Task<Caps> ReadCaps(HttpContext context)
-		{
-			var body = await ReadRequestBody(context);
-			_logger.LogDebug("Request: {0}", body);
-			
-			var capsJson = JsonDocument.Parse(body).RootElement;
-
-			var (caps, w3c) = (JsonDocument.Parse("{}").RootElement, false);
-
-			if (capsJson.TryGetProperty("desiredCapabilities", out var desiredCapabilities))
-			{
-				(caps, w3c) = (desiredCapabilities, false);
-			}
-			else if(capsJson.TryGetProperty("capabilities", out var w3cCapabilities)
-				&& w3cCapabilities.TryGetProperty("alwaysMatch", out var alwaysMatch))
-			{
-				(caps, w3c) = (alwaysMatch, true);
-			}
-
-			string capabilityJsonWireW3C(string jswKey, string w3cKey)
-			{
-				var k = w3c ? w3cKey : jswKey;
-				if (!caps.TryGetProperty(k, out var propElement)) return "";
-
-				switch (propElement.ValueKind)
-				{
-					case JsonValueKind.String:
-						return propElement.GetString();
-					case JsonValueKind.Object:
-						return string.Join(" ",
-							from prop in propElement.EnumerateObject()
-							select $"{prop.Name}={prop.Value.GetString()}");
-					default:
-						_logger.LogError("Failed to interpret {0} capability", k);
-						return "";
-				}
-			}
-
-			string GetCapability(string capKey) => capabilityJsonWireW3C(capKey, capKey);
-
-			return new Caps
-			{
-				browser = GetCapability("browserName") switch
-				{
-					"" => GetCapability("deviceName"),
-					string s  => s
-				},
-				version = capabilityJsonWireW3C("version", "browserVersion"),
-				platform = capabilityJsonWireW3C("platform", "platformName"),
-				labels = GetCapability("labels")
-			};
+			_balancer = balancer;
+			_factory = factory;
+			_routerConfig = routerConfig;
 		}
 
 		private static async Task<string> ReadRequestBody(HttpContext context)
@@ -106,10 +70,31 @@ namespace QaKit.Yagr
 			return body;
 		}
 
+		private async Task RemoteDeleteSession(string sessionId, Uri sessionEndpoint, CancellationToken cancel)
+		{
+			using var client = _factory.CreateClient("delete");
+			var deleteSession = new Uri(sessionEndpoint, $"session/{sessionId}");
+
+			_logger.LogInformation("Sending DELETE request! {0}", deleteSession);
+
+			try
+			{
+				var response = await client.DeleteAsync(deleteSession, cancel);
+				_logger.LogDebug("Completed DELETE request with {0} code.", response.StatusCode);
+			}
+			catch (Exception e)
+			{
+				_logger.LogError("sending DELETE to a '{0}' failed: {1}", deleteSession, e.Message);
+			}
+		}
+
 		public async Task<HttpResponseMessage> HandleProxyRequest(HttpContext context)
 		{
-			if (context.Request.Path == "")
+			_logger.LogDebug($"New proxy '{context.Request.Method}' request '{context.Request.Path}'");
+
+			if (context.Request.Path == "" && context.Request.Method == "POST")
 			{
+				_logger.LogDebug($"Initiating new session");
 				return await ProcessSessionRequest(context);
 			}
 
@@ -117,44 +102,141 @@ namespace QaKit.Yagr
 			var sessionId = ParseSessionId(context.Request.Path);
 			if (!_sessions.TryGetValue(sessionId, out var sessionData))
 			{
-				throw new Exception("invalid session id");
+				_logger.LogDebug($"Failed to find session '{sessionId}', unknown request");
+				return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
 			}
 
+			_logger.LogDebug($"Forwarding request to {sessionData.Upstream}");
 			var response = await context
-				.ForwardTo(sessionData.Endpoint)
+				.ForwardTo(sessionData.Upstream)
 				.AddXForwardedHeaders()
 				.Send();
 
+			// TODO the session might have been deleted by that time, do nothing?
 			if (context.RequestAborted.IsCancellationRequested)
 			{
-				_logger.LogError("Session cancelled! {0}", sessionId);			
-				_sessions.Remove(sessionId);
-				_registry.ReleaseHost(sessionData.Host);
+				ReleaseSession(sessionId);
+				_logger.LogError($"Session cancelled! {sessionId}");
+
+				using var cts = new CancellationTokenSource(DeleteSessionTimeoutMs);
+				await RemoteDeleteSession(sessionId, sessionData.Upstream, cts.Token);
 			}
-			if (context.Request.Method == "DELETE")
+			else if (context.Request.Method == "DELETE")
 			{
 				if (!response.IsSuccessStatusCode)
 				{
-					_logger.LogError("DELETE '{0}' query for {1} session failed", sessionData.Endpoint, sessionId);
-					// TODO is the host stale?
+					_logger.LogError("DELETE '{0}' query for {1} session failed", sessionData.Upstream, sessionId);
 				}
 					
-				_sessions.Remove(sessionId);
-				_registry.ReleaseHost(sessionData.Host);
+				ReleaseSession(sessionId);
+				_logger.LogInformation($"Closed session: {sessionId} on host '{sessionData.Upstream}'");
+			}
+			else
+			{
+				Touch(sessionId, sessionData.HostUri);
 			}
 			return response;
 		}
 
+		private void ReleaseSession(string sessionId)
+		{
+			if(_sessions.Remove(sessionId, out var sessionData))
+			{
+				sessionData.Worker.Dispose();
+				_sessionsExpires.Remove(sessionId, out var _);
+				// TODO consider _registry.ReleaseHost(sessionData.Host)
+			}
+		}
+
+		private void Touch(string sessionId, Uri host)
+		{
+			if (_sessions.TryGetValue(sessionId, out var sessionData))
+			{
+				var now = DateTimeOffset.UtcNow;
+				var expireTime = now + sessionData.Timeout;
+
+				lock(_expiryCleanupLock) {
+					_sessionsExpires.AddOrUpdate(sessionId, expireTime, (_, _1) => expireTime);
+				}
+				_lastHostAccess.AddOrUpdate(host, now, (_, _1) => now);
+			}
+		}
+
+		public async Task CleanupExpiredSessions()
+		{
+			var expired = new List<Tuple<string,Uri,DateTimeOffset>>();
+			lock(_expiryCleanupLock)
+			{
+				var now = DateTimeOffset.UtcNow;
+				var expiredSessions = (from pair in _sessionsExpires
+					where now > pair.Value
+					select pair.Key
+					).ToHashSet();
+				if (!expiredSessions.Any()) return;
+
+				expired = (from pair in _sessions
+					let sessionId = pair.Key
+					where expiredSessions.Contains(sessionId)
+					select Tuple.Create(sessionId, pair.Value.Upstream, _sessionsExpires[sessionId])
+					).ToList();
+				expiredSessions.ToList().ForEach(sessionId =>
+					_sessionsExpires.TryRemove(sessionId, out var _)
+				);
+				if (!expired.Any()) return;
+			}
+
+			expired.ForEach(i => {
+				var (sessionId, _, expires) = i;
+				ReleaseSession(sessionId);
+				_logger.LogWarning($"Removing expired session {sessionId}, expired {expires}");
+			});
+
+			using var cts = new CancellationTokenSource(DeleteSessionTimeoutMs);
+			await Task.WhenAll(from i in expired select RemoteDeleteSession(i.Item1, i.Item2, cts.Token));
+		}
+		public Task TerminateAllSessions(CancellationToken cancel)
+		{
+			var sessions = (from pair in _sessions
+				let sessionId = pair.Key
+				select new { sessionId, endpoint = pair.Value.Upstream }
+				).ToList();
+			if (!sessions.Any()) return Task.CompletedTask;
+
+			sessions.ForEach(i => ReleaseSession(i.sessionId));
+			return Task.WhenAll(from i in sessions select RemoteDeleteSession(i.sessionId, i.endpoint, cancel));
+		}
+
+		// Gets the list of hosts that router successfully communicated with after specified moment of time
+		public IEnumerable<Uri> GetAliveHosts(DateTimeOffset when)
+		{
+			return (
+				from pair in _lastHostAccess
+				where pair.Value > when
+				select pair.Key).ToList();
+		}
+
 		private async Task<HttpResponseMessage> ProcessSessionRequest(HttpContext context)
 		{
-			var retriesLeft = 3;
+			var retriesLeft = _routerConfig.Value.SessionRetryCount;
+			var retryTimeout = _routerConfig.Value.SessionRetryTimeout;
+
+			var body = await ReadRequestBody(context);
+			_logger.LogDebug("Request: {0}", body);
+		
+			if (string.IsNullOrWhiteSpace(body))
+			{
+				_logger.LogDebug("Session request with empty body");
+			}
+
+			var caps = Caps.Parse(body, _logger);
+			_logger.LogInformation($"New session request from {context.Connection.RemoteIpAddress}");
+			_logger.LogDebug($"Requested caps: {JsonSerializer.Serialize(caps)}");
+			var sessionTimeout = GetSessionTimeout(caps);
+
 			do
 			{
-				var caps = await ReadCaps(context);
-				_logger.LogInformation($"Requested caps: {JsonSerializer.Serialize(caps)}");
-
-				var host = await _registry.GetAvailableHost(caps);
-				var sessionEndpoint = new Uri(new Uri(host.Uri.AbsoluteUri.TrimEnd('/') + "/"), "session");
+				var worker = await _balancer.GetNext(new Request(caps));
+				var sessionEndpoint = new Uri(new Uri(worker.Host.AbsoluteUri.TrimEnd('/') + "/"), "session");
 
 				var initResponse = await context
 					.ForwardTo(sessionEndpoint)
@@ -167,23 +249,31 @@ namespace QaKit.Yagr
 					var sessionId = seleniumResponse.RootElement.GetProperty("value").GetProperty("sessionId")
 						.GetString();
 
-					_logger.LogInformation("New session: {0} on host `{1}`", sessionId, host.Uri);
-					_sessions.Add(sessionId, new SessionData(sessionEndpoint, host));
+					_logger.LogInformation($"New session: {sessionId} on host '{worker.Host}'");
+					_sessions.Add(sessionId, new SessionData(sessionEndpoint, worker.Host, worker, sessionTimeout));
+					Touch(sessionId, worker.Host);
+					return initResponse;
 				}
 				else if (--retriesLeft <= 0)
 				{
 					_logger.LogError("Failed to process /session request after 3 retries");
+					return initResponse;
 				}
 				else
 				{
-					_logger.LogWarning("Failed to get response from {0}, retrying in 10s", host.Uri);
-					_registry.ReleaseHost(host);
-					await Task.Delay(10000);
-					continue;
+					_logger.LogWarning("Failed to get response from {0}, retrying in 10s", worker.Host);
+					worker.Dispose();
+					// TODO consider _registry.ReleaseHost(worker);
+					await Task.Delay(retryTimeout);
 				}
-
-				return initResponse;
 			} while (true);
+		}
+
+		private TimeSpan GetSessionTimeout(Caps caps)
+		{
+			// TODO read caps
+			var timeout = _routerConfig.Value.Timeout;
+			return timeout;
 		}
 
 		private static string ParseSessionId(in string requestPath)
